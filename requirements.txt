@@ -1,4 +1,3 @@
-TikTokApi
-yt-dlp
+yt-dlp[default,curl-cffi] @ https://github.com/yt-dlp/yt-dlp/archive/master.zip
 requests
 playwright
