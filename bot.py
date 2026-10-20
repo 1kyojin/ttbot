@@ -1,17 +1,21 @@
 """
-TikTok havola -> Telegram kanal
+TikTok -> Telegram kanal
 
-Siz TikTok'da videoni Telegram orqali botga yuborasiz (Share -> Telegram -> bot).
-Bot navbatdagi ishga tushganda yangi xabarlardagi TikTok havolalarini topadi,
-videoni BIR NECHTA manbadan yuklaydi (tikwm HD va yt-dlp), PyAV bilan
-o'lchaydi va eng yaxshisini (ovoz -> fps -> piksel -> bitreyt) kanalga
-qayta kodlamasdan yuboradi. Natijani (manba, o'lcham, fps, bitreyt) sizga
-botdan javob sifatida yozadi.
+Ikki yo'l:
 
-Faqat kanal adminlari yuborgan havolalar qabul qilinadi.
+1) HAVOLA: TikTok'da Share -> Telegram -> bot. Bot videoni bir nechta usulda
+   yuklaydi (tikwm HD, yt-dlp web, yt-dlp mobil API, yt-dlp H.264), PyAV bilan
+   o'lchaydi va eng yaxshisini (ovoz -> fps -> piksel -> bitreyt) kanalga
+   qayta kodlamasdan yuboradi. Hisobotni botdan javob sifatida yozadi.
+
+2) FAYL (eng yuqori sifat): TikTok ilovasida "Save video" qilib, faylni botga
+   "fayl sifatida" (siqmasdan) yuboring. Bot uni kanalga o'zgartirmay ko'chiradi.
+
+Faqat kanal adminlari yuborganlari qabul qilinadi.
 """
 import json
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -57,12 +61,16 @@ def _first_file(outdir):
     return files[0]
 
 
-def run_ytdlp(url, outdir, impersonate):
+def run_ytdlp(url, outdir, impersonate=True, sort=None, extractor_args=None):
     cmd = ["yt-dlp", "--no-playlist", "-o", os.path.join(outdir, "%(id)s.%(ext)s")]
     if impersonate:
         cmd += ["--impersonate", "chrome"]
+    if sort:
+        cmd += ["-S", sort]
+    if extractor_args:
+        cmd += ["--extractor-args", extractor_args]
     cmd.append(url)
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     if p.returncode != 0:
         lines = [l for l in p.stderr.strip().splitlines() if l.strip()]
         raise RuntimeError(lines[-1][:200] if lines else "yt-dlp xatosi")
@@ -92,6 +100,17 @@ def run_tikwm(url, outdir):
             for chunk in resp.iter_content(1 << 20):
                 f.write(chunk)
     return path
+
+
+def methods_for(url):
+    device_id = str(random.randint(7 * 10**18, 8 * 10**18 - 1))
+    return [
+        ("tikwm", lambda d: run_tikwm(url, d)),
+        ("yt-dlp web", lambda d: run_ytdlp(url, d, True, "res,fps,br")),
+        ("yt-dlp mobil", lambda d: run_ytdlp(
+            url, d, False, "res,fps,br", f"tiktok:device_id={device_id}")),
+        ("yt-dlp h264", lambda d: run_ytdlp(url, d, True, "vcodec:h264,res,fps,br")),
+    ]
 
 
 # ---------- o'lchash va tanlash ----------
@@ -125,7 +144,8 @@ def probe_full(path):
 
 def score(c):
     # o'lchangan > ovoz bor > fps > piksel soni > bitreyt
-    return (c["measured"], c["audio"], round(c["fps"]), c["width"] * c["height"], c["bitrate"] or c["size"])
+    return (c["measured"], c["audio"], round(c["fps"]), c["width"] * c["height"],
+            c["bitrate"] or c["size"])
 
 
 def describe(c):
@@ -136,15 +156,11 @@ def describe(c):
             f"{'ovoz bor' if c['audio'] else 'OVOZSIZ'}, {c['size'] / 1e6:.1f} MB")
 
 
-def gather(url, root):
+def gather(url, root, methods=None):
     """Hamma usullarni sinab, o'lchangan nomzodlar va xatolar ro'yxatini qaytaradi."""
-    methods = [
-        ("tikwm", lambda d: run_tikwm(url, d)),
-        ("yt-dlp", lambda d: run_ytdlp(url, d, True)),
-    ]
     candidates, errors = [], []
     ytdlp_ok = False
-    for i, (name, fn) in enumerate(methods):
+    for i, (name, fn) in enumerate(methods or methods_for(url)):
         sub = Path(root) / str(i)
         sub.mkdir()
         try:
@@ -152,20 +168,20 @@ def gather(url, root):
             info = probe_full(path)
             info.update(name=name, path=path)
             candidates.append(info)
-            if name == "yt-dlp":
+            if name.startswith("yt-dlp"):
                 ytdlp_ok = True
         except Exception as e:
             errors.append(f"{name}: {e}")
-    if not ytdlp_ok:
+    if not candidates and not ytdlp_ok:
         sub = Path(root) / "plain"
         sub.mkdir()
         try:
             path = run_ytdlp(url, str(sub), False)
             info = probe_full(path)
-            info.update(name="yt-dlp (oddiy)", path=path)
+            info.update(name="yt-dlp oddiy", path=path)
             candidates.append(info)
         except Exception as e:
-            errors.append(f"yt-dlp (oddiy): {e}")
+            errors.append(f"yt-dlp oddiy: {e}")
     return candidates, errors
 
 
@@ -184,10 +200,10 @@ def post_video(c):
         raise RuntimeError("Telegram: " + str(r.get("description")))
 
 
-def process(url):
+def process(url, methods=None):
     """Yuborilgan video haqida hisobot matnini qaytaradi."""
     with tempfile.TemporaryDirectory() as tmp:
-        candidates, errors = gather(url, tmp)
+        candidates, errors = gather(url, tmp, methods)
         if not candidates:
             raise RuntimeError(" | ".join(errors) or "yuklab bo'lmadi")
         ordered = sorted(candidates, key=score, reverse=True)
@@ -203,6 +219,13 @@ def process(url):
         for e in errors:
             lines.append("Xato -> " + e)
         return "\n".join(lines)
+
+
+def is_video_message(m):
+    if m.get("video"):
+        return True
+    doc = m.get("document") or {}
+    return str(doc.get("mime_type", "")).startswith("video/")
 
 
 def main():
@@ -221,8 +244,25 @@ def main():
         text = m.get("text") or m.get("caption") or ""
         chat_id = (m.get("chat") or {}).get("id")
         uid = (m.get("from") or {}).get("id")
+        if chat_id is None:
+            continue
+
+        # 2-yo'l: tayyor video fayl -> kanalga o'zgartirmay ko'chirish
+        if is_video_message(m):
+            if uid not in admins:
+                say(chat_id, "Ruxsat yo'q.")
+                continue
+            res = tg("copyMessage", data={
+                "chat_id": CHANNEL, "from_chat_id": chat_id, "message_id": m["message_id"]})
+            if res.get("ok"):
+                say(chat_id, "✅ Fayl kanalga o'zgartirilmasdan ko'chirildi")
+            else:
+                say(chat_id, f"❌ Ko'chirilmadi: {res.get('description')}")
+            continue
+
+        # 1-yo'l: TikTok havolasi
         urls = URL_RE.findall(text)
-        if not urls or chat_id is None:
+        if not urls:
             continue
         if uid not in admins:
             print("Ruxsatsiz foydalanuvchi:", uid)
