@@ -3,7 +3,7 @@ TikTok havola -> Telegram kanal
 
 Siz TikTok'da videoni Telegram orqali botga yuborasiz (Share -> Telegram -> bot).
 Bot navbatdagi ishga tushganda yangi xabarlardagi TikTok havolalarini topadi,
-videoni BIR NECHTA manbadan yuklaydi (tikwm HD va yt-dlp), ffprobe bilan
+videoni BIR NECHTA manbadan yuklaydi (tikwm HD va yt-dlp), PyAV bilan
 o'lchaydi va eng yaxshisini (ovoz -> fps -> piksel -> bitreyt) kanalga
 qayta kodlamasdan yuboradi. Natijani (manba, o'lcham, fps, bitreyt) sizga
 botdan javob sifatida yozadi.
@@ -97,47 +97,40 @@ def run_tikwm(url, outdir):
 # ---------- o'lchash va tanlash ----------
 
 def probe_full(path):
-    p = subprocess.run(
-        ["ffprobe", "-v", "error",
-         "-show_entries",
-         "stream=codec_type,codec_name,width,height,avg_frame_rate:format=duration,bit_rate",
-         "-of", "json", str(path)],
-        capture_output=True, text=True, timeout=60,
-    )
-    d = json.loads(p.stdout)
-    streams = d.get("streams", [])
-    v = next((s for s in streams if s.get("codec_type") == "video"), None)
-    if not v:
-        raise RuntimeError("video oqimi yo'q")
-    has_audio = any(s.get("codec_type") == "audio" for s in streams)
-    try:
-        num, den = v.get("avg_frame_rate", "0/1").split("/")
-        fps = float(num) / float(den) if float(den) else 0.0
-    except Exception:
-        fps = 0.0
+    """Video o'lchamlari (PyAV orqali, ffprobe kerak emas). Xato bo'lsa ham qaytaradi."""
     size = Path(path).stat().st_size
-    dur = float((d.get("format") or {}).get("duration") or 0)
-    br = int((d.get("format") or {}).get("bit_rate") or 0)
-    if not br and dur:
-        br = int(size * 8 / dur)
-    return {
-        "width": int(v.get("width") or 0),
-        "height": int(v.get("height") or 0),
-        "fps": round(fps, 1),
-        "duration": int(dur),
-        "bitrate": br,
-        "codec": v.get("codec_name") or "?",
-        "audio": has_audio,
-        "size": size,
-    }
+    info = {"width": 0, "height": 0, "fps": 0.0, "duration": 0, "bitrate": 0,
+            "codec": "?", "audio": True, "size": size, "measured": False}
+    try:
+        import av
+        with av.open(str(path)) as c:
+            v = next((s for s in c.streams if s.type == "video"), None)
+            if v is None:
+                raise RuntimeError("video oqimi yo'q")
+            info["audio"] = any(s.type == "audio" for s in c.streams)
+            rate = v.average_rate or v.guessed_rate
+            info["fps"] = round(float(rate), 1) if rate else 0.0
+            info["width"] = int(v.codec_context.width or 0)
+            info["height"] = int(v.codec_context.height or 0)
+            info["codec"] = v.codec_context.name or "?"
+            dur = float(c.duration) / 1_000_000 if c.duration else 0.0
+            info["duration"] = int(dur)
+            if dur:
+                info["bitrate"] = int(size * 8 / dur)
+            info["measured"] = True
+    except Exception as e:
+        print("  o'lchab bo'lmadi:", e)
+    return info
 
 
 def score(c):
-    # ovoz bor > fps > piksel soni > bitreyt
-    return (c["audio"], round(c["fps"]), c["width"] * c["height"], c["bitrate"])
+    # o'lchangan > ovoz bor > fps > piksel soni > bitreyt
+    return (c["measured"], c["audio"], round(c["fps"]), c["width"] * c["height"], c["bitrate"] or c["size"])
 
 
 def describe(c):
+    if not c.get("measured"):
+        return f"{c['name']}: o'lchab bo'lmadi, {c['size'] / 1e6:.1f} MB"
     return (f"{c['name']}: {c['width']}x{c['height']}, {c['fps']:g} fps, "
             f"{c['bitrate'] / 1e6:.1f} Mbit/s, {c['codec']}, "
             f"{'ovoz bor' if c['audio'] else 'OVOZSIZ'}, {c['size'] / 1e6:.1f} MB")
