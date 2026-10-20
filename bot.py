@@ -1,12 +1,14 @@
 """
-TikTok -> Telegram kanal
+TikTok / Instagram -> Telegram kanal
 
 Ikki yo'l:
 
-1) HAVOLA: TikTok'da Share -> Telegram -> bot. Bot videoni bir nechta usulda
-   yuklaydi (tikwm HD, yt-dlp web, yt-dlp mobil API, yt-dlp H.264), PyAV bilan
-   o'lchaydi va eng yaxshisini (ovoz -> fps -> piksel -> bitreyt) kanalga
-   qayta kodlamasdan yuboradi. Hisobotni botdan javob sifatida yozadi.
+1) HAVOLA: TikTok yoki Instagram'da Share -> Telegram -> bot.
+   TikTok: tikwm HD, yt-dlp web, yt-dlp mobil API, yt-dlp H.264.
+   Instagram (Reels, post, IGTV): yt-dlp eng yaxshi video + eng yaxshi ovoz,
+   ffmpeg bilan qayta kodlamasdan birlashtiriladi.
+   Bot hammasini PyAV bilan o'lchaydi va eng yaxshisini (ovoz -> fps ->
+   piksel -> bitreyt) kanalga yuboradi. Hisobotni botdan javob sifatida yozadi.
 
 2) FAYL (eng yuqori sifat): TikTok ilovasida "Save video" qilib, faylni botga
    "fayl sifatida" (siqmasdan) yuboring. Bot uni kanalga o'zgartirmay ko'chiradi.
@@ -30,7 +32,10 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL"]  # @kanal_username yoki -100... ID
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 MAX_SIZE = 50 * 1024 * 1024  # Bot API limiti
-URL_RE = re.compile(r"https?://(?:[\w-]+\.)*tiktok\.com/\S+", re.I)
+TIKTOK_RE = re.compile(r"https?://(?:[\w-]+\.)*tiktok\.com/\S+", re.I)
+INSTA_RE = re.compile(
+    r"https?://(?:www\.)?(?:instagram\.com|instagr\.am)/(?:[\w.]+/)?(?:reels?|p|tv)/[\w-]+\S*", re.I)
+INSTAGRAM_COOKIES = os.getenv("INSTAGRAM_COOKIES", "")  # ixtiyoriy, Netscape format
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
@@ -64,8 +69,25 @@ def _first_file(outdir):
     return files[0]
 
 
-def run_ytdlp(url, outdir, impersonate=True, sort=None, extractor_args=None):
-    cmd = ["yt-dlp", "--no-playlist", "-o", os.path.join(outdir, "%(id)s.%(ext)s")]
+def ffmpeg_path():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def run_ytdlp(url, outdir, impersonate=True, sort=None, extractor_args=None,
+              fmt=None, cookies=None):
+    cmd = ["yt-dlp", "--no-playlist", "--playlist-items", "1",
+           "-o", os.path.join(outdir, "%(id)s.%(ext)s")]
+    ff = ffmpeg_path()
+    if ff:
+        cmd += ["--ffmpeg-location", ff, "--merge-output-format", "mp4"]
+    if fmt:
+        cmd += ["-f", fmt]
+    if cookies:
+        cmd += ["--cookies", cookies]
     if impersonate:
         cmd += ["--impersonate", "chrome"]
     if sort:
@@ -103,6 +125,18 @@ def run_tikwm(url, outdir):
             for chunk in resp.iter_content(1 << 20):
                 f.write(chunk)
     return path
+
+
+def instagram_methods(url, root):
+    cookies = None
+    if INSTAGRAM_COOKIES.strip():
+        cookies = str(Path(root) / "ig_cookies.txt")
+        Path(cookies).write_text(INSTAGRAM_COOKIES)
+    best = "bv*+ba/b"
+    return [
+        ("instagram", lambda d: run_ytdlp(url, d, True, "res,fps,br", fmt=best, cookies=cookies)),
+        ("instagram oddiy", lambda d: run_ytdlp(url, d, False, "res,fps,br", fmt=best, cookies=cookies)),
+    ]
 
 
 def methods_for(url):
@@ -163,7 +197,10 @@ def gather(url, root, methods=None):
     """Hamma usullarni sinab, o'lchangan nomzodlar va xatolar ro'yxatini qaytaradi."""
     candidates, errors = [], []
     ytdlp_ok = False
-    for i, (name, fn) in enumerate(methods or methods_for(url)):
+    is_insta = bool(INSTA_RE.match(url))
+    if methods is None:
+        methods = instagram_methods(url, root) if is_insta else methods_for(url)
+    for i, (name, fn) in enumerate(methods):
         sub = Path(root) / str(i)
         sub.mkdir()
         try:
@@ -171,7 +208,7 @@ def gather(url, root, methods=None):
             info = probe_full(path)
             info.update(name=name, path=path)
             candidates.append(info)
-            if name.startswith("yt-dlp"):
+            if name.startswith("yt-dlp") or name.startswith("instagram"):
                 ytdlp_ok = True
         except Exception as e:
             errors.append(f"{name}: {e}")
@@ -225,7 +262,7 @@ def process(url, methods=None):
 
 
 def notify_stranger(m, admins):
-    """Foydalanuvchi haqida adminlarga xabar."""
+    """Begona foydalanuvchi haqida adminlarga xabar."""
     u = m.get("from") or {}
     uid = u.get("id")
     name = " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x) or "?"
@@ -307,8 +344,8 @@ def main():
                 say(chat_id, f"❌ Ko'chirilmadi: {res.get('description')}")
             continue
 
-        # 1-yo'l: TikTok havolasi
-        urls = URL_RE.findall(text)
+        # 1-yo'l: TikTok / Instagram havolasi
+        urls = TIKTOK_RE.findall(text) + INSTA_RE.findall(text)
         if not urls:
             continue
 
