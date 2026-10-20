@@ -12,8 +12,8 @@ Ikki yo'l:
    "fayl sifatida" (siqmasdan) yuboring. Bot uni kanalga o'zgartirmay ko'chiradi.
 
 Faqat kanal adminlari yuborganlari qabul qilinadi.
-Begona odam botga yozsa (/start va h.k.), adminlarga uning ma'lumotlari,
-profil rasmi va profiliga havola yuboriladi.
+Kimdir /start bossa (admin ham) yoki begona odam biror narsa yozsa,
+adminlarga uning ma'lumotlari, profil rasmi va profiliga havola yuboriladi.
 """
 import html
 import json
@@ -225,14 +225,14 @@ def process(url, methods=None):
 
 
 def notify_stranger(m, admins):
-    """Begona foydalanuvchi haqida adminlarga xabar."""
+    """Foydalanuvchi haqida adminlarga xabar."""
     u = m.get("from") or {}
     uid = u.get("id")
     name = " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x) or "?"
     uname = u.get("username")
     text = m.get("text") or m.get("caption") or ("[video]" if is_video_message(m) else "[boshqa turdagi xabar]")
     lines = [
-        "👤 <b>Botga yangi odam yozdi</b>",
+        "👤 <b>Botga yozishdi</b>" + (" (admin)" if uid in admins else ""),
         f"Ism: <a href=\"tg://user?id={uid}\">{html.escape(name)}</a>",
         f"Username: @{html.escape(uname)}" if uname else "Username: yo'q",
         f"ID: <code>{uid}</code>",
@@ -289,6 +289,12 @@ def main():
             print("Begona foydalanuvchi:", uid)
             notify_stranger(m, admins)
             say(chat_id, "Bu shaxsiy bot.")
+            continue
+
+        # Admin /start bossa ham uning ma'lumotlari yuboriladi
+        if text.strip().startswith("/start"):
+            print("Admin /start:", uid)
+            notify_stranger(m, admins)
             continue
 
         # 2-yo'l: tayyor video fayl -> kanalga o'zgartirmay ko'chirish
