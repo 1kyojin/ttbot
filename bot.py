@@ -3,8 +3,13 @@ TikTok havola -> Telegram kanal
 
 Siz TikTok'da videoni Telegram orqali botga yuborasiz (Share -> Telegram -> bot).
 Bot navbatdagi ishga tushganda yangi xabarlardagi TikTok havolalarini topadi,
-videoni yt-dlp bilan eng yuqori sifatda yuklaydi (qayta kodlamasdan) va
-kanalga yuboradi. Natijani sizga botdan javob sifatida yozadi.
+videoni eng yuqori sifatda yuklaydi (qayta kodlamasdan) va kanalga yuboradi.
+Natijani sizga botdan javob sifatida yozadi.
+
+Yuklash tartibi:
+  1) yt-dlp (Chrome taqlidi bilan)
+  2) yt-dlp (oddiy)
+  3) zaxira: tikwm.com ochiq API (TikTok GitHub IP'ni bloklasa)
 
 Faqat kanal adminlari yuborgan havolalar qabul qilinadi.
 """
@@ -22,6 +27,8 @@ CHANNEL = os.environ["CHANNEL"]  # @kanal_username yoki -100... ID
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 MAX_SIZE = 50 * 1024 * 1024  # Bot API limiti
 URL_RE = re.compile(r"https?://(?:[\w-]+\.)*tiktok\.com/\S+", re.I)
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
 def tg(method, **kwargs):
@@ -33,7 +40,7 @@ def tg(method, **kwargs):
 
 
 def say(chat_id, text):
-    tg("sendMessage", data={"chat_id": chat_id, "text": text})
+    tg("sendMessage", data={"chat_id": chat_id, "text": text[:3500]})
 
 
 def admin_ids():
@@ -44,20 +51,68 @@ def admin_ids():
     return {a["user"]["id"] for a in r["result"]}
 
 
-def download(url, outdir):
-    out = os.path.join(outdir, "%(id)s.%(ext)s")
-    p = subprocess.run(
-        ["yt-dlp", "--no-playlist", "-o", out, url],
-        capture_output=True, text=True, timeout=240,
-    )
-    if p.returncode != 0:
-        lines = [l for l in p.stderr.strip().splitlines() if l.strip()]
-        raise RuntimeError(lines[-1] if lines else "yt-dlp xatosi")
+# ---------- yuklash ----------
+
+def _first_file(outdir):
     files = [f for f in Path(outdir).iterdir() if f.is_file()]
     if not files:
         raise RuntimeError("fayl topilmadi")
     return files[0]
 
+
+def run_ytdlp(url, outdir, impersonate):
+    cmd = ["yt-dlp", "--no-playlist", "-o", os.path.join(outdir, "%(id)s.%(ext)s")]
+    if impersonate:
+        cmd += ["--impersonate", "chrome"]
+    cmd.append(url)
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+    if p.returncode != 0:
+        lines = [l for l in p.stderr.strip().splitlines() if l.strip()]
+        raise RuntimeError(lines[-1][:250] if lines else "yt-dlp xatosi")
+    return _first_file(outdir)
+
+
+def run_tikwm(url, outdir):
+    r = requests.get(
+        "https://www.tikwm.com/api/",
+        params={"url": url, "hd": 1},
+        headers={"User-Agent": UA},
+        timeout=60,
+    )
+    j = r.json()
+    if j.get("code") != 0:
+        raise RuntimeError(str(j.get("msg") or "tikwm xatosi"))
+    d = j["data"]
+    link = d.get("hdplay") or d.get("play")
+    if not link:
+        raise RuntimeError("tikwm video havolasini bermadi")
+    if link.startswith("/"):
+        link = "https://www.tikwm.com" + link
+    path = Path(outdir) / f"{d.get('id', 'video')}.mp4"
+    with requests.get(link, stream=True, headers={"User-Agent": UA}, timeout=120) as resp:
+        resp.raise_for_status()
+        with open(path, "wb") as f:
+            for chunk in resp.iter_content(1 << 20):
+                f.write(chunk)
+    return path
+
+
+def download(url, outdir):
+    errors = []
+    for imp in (True, False):
+        try:
+            return run_ytdlp(url, outdir, imp)
+        except Exception as e:
+            errors.append(f"yt-dlp{' (chrome)' if imp else ''}: {e}")
+    try:
+        print("  zaxira usul: tikwm")
+        return run_tikwm(url, outdir)
+    except Exception as e:
+        errors.append(f"tikwm: {e}")
+    raise RuntimeError(" | ".join(errors))
+
+
+# ---------- yuborish ----------
 
 def probe(path):
     """O'lcham va davomiylik (vertikal video to'g'ri ko'rinishi uchun)."""
@@ -80,8 +135,9 @@ def probe(path):
 
 
 def post_video(path):
-    if path.stat().st_size > MAX_SIZE:
-        raise RuntimeError(f"video juda katta ({path.stat().st_size / 1e6:.0f} MB, limit 50 MB)")
+    size = path.stat().st_size
+    if size > MAX_SIZE:
+        raise RuntimeError(f"video juda katta ({size / 1e6:.0f} MB, limit 50 MB)")
     data = {"chat_id": CHANNEL, "supports_streaming": "true"}
     data.update({k: str(v) for k, v in probe(path).items()})
     with open(path, "rb") as f:
